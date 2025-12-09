@@ -92,12 +92,14 @@ _init_env(lua_State *L) {
 	lua_pop(L,1); // 历结束后，栈中剩余的是 [配置表, 最后一个键]，彻底清理栈中与配置表相关的内容
 }
 
+// 忽略（屏蔽）SIGPIPE信号，当进程向一个已经关闭的管道或套接字socket写入数据时，操作系统会向进程发送SIGPIPE信号。
+// 默认情况下，进程收到SIGPIPE后会直接中止，可能导致程序意外推出。
 int sigign() {
 	struct sigaction sa;
-	sa.sa_handler = SIG_IGN;
-	sa.sa_flags = 0;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGPIPE, &sa, 0);
+	sa.sa_handler = SIG_IGN; // 指定信号的处理函数，SIG_IGN 是一个特殊值，表示 “忽略该信号”（Ignore）
+	sa.sa_flags = 0; // 指定信号的处理函数，SIG_IGN 是一个特殊值，表示 “忽略该信号”（Ignore）
+	sigemptyset(&sa.sa_mask); // sa_mask 是一个信号集，指定在处理当前信号时需要阻塞的其他信号。sigemptyset 函数将其初始化为空集，即处理 SIGPIPE 时不阻塞任何其他信号
+	sigaction(SIGPIPE, &sa, 0); // 调用 sigaction 系统调用，将 SIGPIPE 信号的处理方式设置为 sa 结构体中定义的配置（忽略）。第三个参数为 0，表示不需要保存旧的信号处理配置
 	return 0;
 }
 
@@ -134,54 +136,66 @@ static const char * load_config = "\
 
 int
 main(int argc, char *argv[]) {
+	// 命令行处理
 	const char * config_file = NULL ;
 	if (argc > 1) {
-		config_file = argv[1];
+		config_file = argv[1]; // config file路径
 	} else {
 		fprintf(stderr, "Need a config file. Please read skynet wiki : https://github.com/cloudwu/skynet/wiki/Config\n"
 			"usage: skynet configfilename\n");
 		return 1;
 	}
 
-	skynet_globalinit();
-	skynet_env_init();
+	// 全局初始化
+	skynet_globalinit(); // 全局变量初始化 线程本地存储键和主线程标识 skynet_server.c globalinit
+	skynet_env_init(); // 环境变量结构体初始化
 
-	sigign();
+	sigign(); // // 忽略 SIGPIPE 信号（避免网络操作时进程意外终止）
 
 	struct skynet_config config;
 
+// lua代码缓存初始化
 #ifdef LUA_CACHELIB
 	// init the lock of code cache
+	// 初始化 Lua 代码缓存的锁（多线程安全相关）
 	luaL_initcodecache();
 #endif
 
+	// 加载并执行配置文件
 	struct lua_State *L = luaL_newstate();
 	luaL_openlibs(L);	// link lua lib
 
+	// 加载配置解析逻辑（字符串形式的 Lua 代码 load_config） 
 	int err =  luaL_loadbufferx(L, load_config, strlen(load_config), "=[skynet config]", "t");
-	assert(err == LUA_OK);
-	lua_pushstring(L, config_file);
+	assert(err == LUA_OK); // 确保加载成功
+	lua_pushstring(L, config_file); // 向 Lua 栈压入配置文件路径作为参数
 
+	// 执行加载的配置解析代码（传入 1 个参数，期望 1 个返回值）
 	err = lua_pcall(L, 1, 1, 0);
 	if (err) {
-		fprintf(stderr,"%s\n",lua_tostring(L,-1));
+		fprintf(stderr,"%s\n",lua_tostring(L,-1)); // 打印执行错误
 		lua_close(L);
 		return 1;
 	}
+	// 将lua配置表转换为skynet 环境变量
 	_init_env(L);
-	lua_close(L);
+	lua_close(L); // 关闭 Lua 虚拟机，配置加载完成
 
-	config.thread =  optint("thread",8);
-	config.module_path = optstring("cpath","./cservice/?.so");
-	config.harbor = optint("harbor", 1);
-	config.bootstrap = optstring("bootstrap","snlua bootstrap");
-	config.daemon = optstring("daemon", NULL);
-	config.logger = optstring("logger", NULL);
-	config.logservice = optstring("logservice", "logger");
-	config.profile = optboolean("profile", 1);
+	// 5. 构建skynet配置结构体
+	// 环境变量中读取配置（或使用默认值），构建 skynet_config 结构体，该结构体是启动 Skynet 的核心参数
+	config.thread =  optint("thread",8);  // 工作线程数（默认 8）
+	config.module_path = optstring("cpath","./cservice/?.so");  // C 服务模块路径（默认 ./cservice/?.so）
+	config.harbor = optint("harbor", 1);  // 节点编号（默认 1，用于分布式部署）
+	config.bootstrap = optstring("bootstrap","snlua bootstrap"); // 启动入口服务（默认 snlua bootstrap）
+	config.daemon = optstring("daemon", NULL); // 守护进程日志文件路径（默认不启用） 
+	config.logger = optstring("logger", NULL);  // 日志输出文件路径（默认控制台）
+	config.logservice = optstring("logservice", "logger"); // 日志服务类型（默认 logger）
+	config.profile = optboolean("profile", 1); // 是否启用性能分析（默认启用）
 
-	skynet_start(&config);
-	skynet_globalexit();
+	// 启动 Skynet 框架核心服务
+	skynet_start(&config); // skynet_start 是框架启动的核心函数，根据 config 参数初始化工作线程、启动入口服务（如 bootstrap），进入事件循环
+	skynet_globalexit(); // 框架运行结束后，skynet_globalexit 执行全局资源清理， 全局的数据删除
 
 	return 0;
 }
+// 校验参数 → 初始化环境 → 加载配置 → 构建启动参数 → 启动框架
