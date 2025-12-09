@@ -261,6 +261,11 @@ start(int thread) {
 		wp[i].m = m; // 关联监控器
 		wp[i].id = i;  // 线程唯一ID（对应监控实例索引）
 		// 分配权重：前32个线程使用预定义权重，超出部分默认0
+		// 创建 worker 线程
+    // 每次处理的工作量权重，是服务队列中消息总数右移的位数，小于 0 的每次只读一条
+    // 前四个线程每次只处理一条消息
+    // 后面的四个每次处理队列中的全部消息
+    // 再后面分别是每次 1/2，1/4，1/8
 		if (i < sizeof(weight)/sizeof(weight[0])) {
 			wp[i].weight= weight[i];
 		} else {
@@ -279,33 +284,51 @@ start(int thread) {
 	free_monitor(m);
 }
 
+// 业务入口启动器，负责解析用户配置的启动命令行（cmdline），解析出第一个服务名称和参数，启动该核心服务，并在启动失败时通过日志服务记录错误并退出框架
 static void
 bootstrap(uint32_t logger_handle, const char * cmdline) {
+	// 获取命令行字符串长度
 	int sz = strlen(cmdline);
+	// 存储服务名称和参数分配缓冲区（+1 预留字符串结束符'\0'位置）
 	char name[sz+1];
 	char args[sz+1];
-	int arg_pos;
+	int arg_pos; // 记录参数在命令行中的起始位置
+
+	// 从命令行中解析出服务名称（以空格为分隔符的第一个字段）
 	sscanf(cmdline, "%s", name);
+	// 计算服务名称的长度（用于定位参数起始位置）
 	arg_pos = strlen(name);
+
+	// 解析命令行中的参数部分
 	if (arg_pos < sz) {
+		// 跳过服务名称后的空格（处理连续空格的情况）
 		while(cmdline[arg_pos] == ' ') {
 			arg_pos++;
 		}
+		// 将剩余部分复制到参数缓冲区（从第一个非空格字符开始）
 		strncpy(args, cmdline + arg_pos, sz);
-	} else {
-		args[0] = '\0';
+	} else { // 如果命令行只有服务名称，无参数
+		args[0] = '\0'; // 参数设为空字符串
 	}
-	const uint32_t handle = skynet_context_new(name, args);
-	if (handle == 0) {
+
+	// 启动解析出的服务（name为服务名，args为参数）
+	const uint32_t handle = skynet_context_new(name, args); // 启动服务
+	if (handle == 0) { // 服务启动失败（返回句柄为0）
+		// 获取日志服务的上下文（用于输出错误信息）
 		struct skynet_context *logger = skynet_handle_grab(logger_handle);
 		if (logger != NULL) {
+			// 输出启动失败的错误信息（包含命令行内容）
 			skynet_error(NULL, "Bootstrap error : %s\n", cmdline);
+			// 强制日志服务处理所有积压的消息（确保错误信息被输出）
 			skynet_context_dispatchall(logger);
+			// 释放日志服务的上下文引用
 			skynet_context_release(logger);
 		}
+		// 启动失败，框架退出
 		exit(1);
 	}
 }
+// skynet_context_new启动服务的函数
 
 // 入口函数，负责初始化框架核心组件、启动关键服务（如日志服务）、加载启动配置，并最终启动所有工作线程，完成框架的整体启动流程
 void
