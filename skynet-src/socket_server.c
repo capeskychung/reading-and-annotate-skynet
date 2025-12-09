@@ -41,14 +41,14 @@
 #define HASH_ID(id) (((unsigned)id) % MAX_SOCKET)
 #define ID_TAG16(id) ((id>>MAX_SOCKET_P) & 0xffff)
 
-#define PROTOCOL_TCP 0
-#define PROTOCOL_UDP 1
-#define PROTOCOL_UDPv6 2
+#define PROTOCOL_TCP 0 // tcp协议
+#define PROTOCOL_UDP 1 // udp
+#define PROTOCOL_UDPv6 2 // udp ipv6
 #define PROTOCOL_UNKNOWN 255
 
 #define UDP_ADDRESS_SIZE 19	// ipv6 128bit + port 16bit + 1 byte type
 
-#define MAX_UDP_PACKAGE 65535
+#define MAX_UDP_PACKAGE 65535 
 
 // EAGAIN and EWOULDBLOCK may be not the same value.
 #if (EAGAIN != EWOULDBLOCK)
@@ -62,79 +62,92 @@
 #define USEROBJECT ((size_t)(-1))
 
 struct write_buffer {
-	struct write_buffer * next;
-	const void *buffer;
-	char *ptr;
-	size_t sz;
-	bool userobject;
+	struct write_buffer * next;  // 链表节点，用于串联多个缓冲区
+	const void *buffer; // 指向待发送的数据内存
+	char *ptr; // 当前发送位置（用于断点续传） 支持因网络阻塞中断后继续发送，提高发送效率
+	size_t sz; // 剩余待发送的字节数
+	bool userobject; // 标记是否为用户自定义对象（需特殊释放）  若为用户自定义对象，使用注册的 free 函数释放 否则直接调用 skynet_free
 };
 
+// UDP 专用扩展结构（包含目标地址）
 struct write_buffer_udp {
 	struct write_buffer buffer;
-	uint8_t udp_address[UDP_ADDRESS_SIZE];
+	uint8_t udp_address[UDP_ADDRESS_SIZE]; // UDP 目标地址信息
 };
 
 struct wb_list {
-	struct write_buffer * head;
-	struct write_buffer * tail;
+	struct write_buffer * head;  // list的头节点
+	struct write_buffer * tail;  // list的尾节点
 };
 
 struct socket_stat {
-	uint64_t rtime;
+	uint64_t rtime;  // 最后一次读写操作的时间戳
 	uint64_t wtime;
-	uint64_t read;
+	uint64_t read; // 累计读写的字节数
 	uint64_t write;
 };
 
 struct socket {
-	uintptr_t opaque;
-	struct wb_list high;
-	struct wb_list low;
-	int64_t wb_size;
-	struct socket_stat stat;
-	ATOM_ULONG sending;
-	int fd;
-	int id;
-	ATOM_INT type;
-	uint8_t protocol;
-	bool reading;
-	bool writing;
-	bool closing;
-	ATOM_INT udpconnecting;
-	int64_t warn_size;
+	uintptr_t opaque; // 透传数据，不参与底层网络逻辑，仅在事件回调时传递给上层
+	struct wb_list high;  // 高优先级的发送队列
+	struct wb_list low;  // 低优先级的发送队列
+	int64_t wb_size;  // 发送缓冲区总大小（字节数），用于监控缓冲区占用，避免内存溢出
+	struct socket_stat stat; // 包含收发数据的统计信息
+	ATOM_ULONG sending;  // 发送状态标记（原子类型），用于多线程同步，避免并发发送冲突（高 16 位为 ID_TAG16(id)，低 16 位为计数器）
+	int fd;  // 文件描述符
+	int id; // skynet中为socket分配的唯一标识 大于0
+	ATOM_INT type; // 连接状态（原子类型，支持多线程安全访问），取值为宏定义的状态常量（如 SOCKET_TYPE_CONNECTING 表示连接中、SOCKET_TYPE_CONNECTED 表示已连接等
+	uint8_t protocol; // 协议类型，取值为宏定义的 PROTOCOL_TCP（0）、PROTOCOL_UDP（1）、PROTOCOL_UDPv6（2）
+	bool reading; // 是否监听读事件 true表示允许接收数据，由enable_read函数控制
+	bool writing; // 是否监听写事件， true 表示允许发送数据，enable_write函数控制
+	bool closing; // 是否处于关闭中的状态
+	ATOM_INT udpconnecting; // UDP 连接状态（原子类型），用于标记 UDP 是否处于 “连接” 过程（模拟 TCP 连接特性）
+	int64_t warn_size; // 缓冲区告警阈值，当 wb_size 超过此值时可能触发警告（避免缓冲区过度堆积）
 	union {
-		int size;
-		uint8_t udp_address[UDP_ADDRESS_SIZE];
+		int size; // TCP缓冲区大小，初始值为 MIN_READ_BUFFER 64
+		uint8_t udp_address[UDP_ADDRESS_SIZE]; // UDP 关联的目标地址（包含地址类型、端口、IP 地址等，长度固定为 19 字节）
 	} p;
-	struct spinlock dw_lock;
-	int dw_offset;
-	const void * dw_buffer;
-	size_t dw_size;
+	struct spinlock dw_lock;  //自旋锁，用于保护 dw_ 系列字段的并发访问（与延迟发送缓冲区相关）
+	int dw_offset; // 延迟发送的当前偏移量（记录已发送部分的位置） 这些字段用于处理未完成的发送操作，配合 dw_lock 实现多线程安全的断点续传
+	const void * dw_buffer; // 延迟发送的缓冲区数据指针
+	size_t dw_size; // 延迟发送的数据大小
 };
 
 struct socket_server {
-	volatile uint64_t time;
-	int reserve_fd;	// for EMFILE
-	int recvctrl_fd;
-	int sendctrl_fd;
-	int checkctrl;
-	poll_fd event_fd;
-	ATOM_INT alloc_id;
-	int event_n;
-	int event_index;
-	struct socket_object_interface soi;
-	struct event ev[MAX_EVENT];
-	struct socket slot[MAX_SOCKET];
-	char buffer[MAX_INFO];
-	uint8_t udpbuffer[MAX_UDP_PACKAGE];
-	fd_set rfds;
+	// 时间管理 
+	volatile uint64_t time; // 当前时间戳（volatile 确保多线程下的可见性），用于网络事件的超时管理和统计（如最后一次读写时间）
+
+	// 文件描述符相关
+	int reserve_fd;	// for EMFILE 预留的文件描述符，用于应对 EMFILE 错误（系统文件描述符耗尽时的应急处理
+	int recvctrl_fd; // 控制管道的读端，用于线程间通信（如处理外部发送的连接、关闭等命令）
+	int sendctrl_fd; // 控制管道的写端，用于线程间通信（如处理外部发送的连接、关闭等命令）
+	fd_set rfds; // 文件描述符集合，用于辅助监听控制管道的可读事件。
+
+	// 连接管理
+	ATOM_INT alloc_id; // 原子类型的ID分配器，用于生成socket的唯一标识，确保多线程安全。
+	struct socket slot[MAX_SOCKET]; // socket 连接数组（大小为 2^16） 65536，通过 HASH_ID(id) 映射管理所有连接，实现 O (1) 级别的访问效率
+	// HASH_ID(id) (((unsigned)id) % MAX_SOCKET)
+
+	// 事件驱动核心
+	poll_fd event_fd; // I/O 多路复用句柄（封装了 epoll/kqueue 等底层实现），用于监听所有 socket 的读写事件
+	struct event ev[MAX_EVENT]; // 事件数组，存储一次 I/O 多路复用调用返回的就绪事件（最多 MAX_EVENT 个  64 个
+	int event_n; // 当前就绪事件的总数，ev数组中有效事件的数量
+	int event_index; // 事件处理的当前索引
+	int checkctrl; // 控制管道事件的检查标记 非0 表示需要处理控制命令
+
+	// 缓冲区与接口
+	struct socket_object_interface soi; // socket 对象接口，封装了业务层对象的内存管理函数（如缓冲区的分配、释放），实现框架与业务逻辑的解耦
+	char buffer[MAX_INFO]; // 通用缓冲区（大小 MAX_INFO=128），用于临时存储字符串信息（如 IP 地址转换结果）
+	uint8_t udpbuffer[MAX_UDP_PACKAGE]; // UDP 接收缓冲区（大小 65535），用于暂存收到的 UDP 数据包
+	
 };
 
+// 用于描述 “发起连接” 请求的参数，对应 TCP 客户端主动连接服务器的操作
 struct request_open {
-	int id;
-	int port;
-	uintptr_t opaque;
-	char host[1];
+	int id; // socket 连接的唯一标识
+	int port; // 目标服务器的端口
+	uintptr_t opaque; // 透传数据（通常关联业务层的服务句柄，用于回调时标识上下文）
+	char host[1];  // 目标服务器的主机地址（IP 或域名），采用柔性数组设计，实际存储时会动态分配足够长度
 };
 
 struct request_send {
@@ -547,6 +560,7 @@ check_wb_list(struct wb_list *s) {
 	assert(s->tail == NULL);
 }
 
+// 入队后启用 socket 的写事件监听（enable_write），触发后续发送逻辑
 static inline int
 enable_write(struct socket_server *ss, struct socket *s, bool enable) {
 	if (s->writing != enable) {
@@ -1876,6 +1890,7 @@ can_direct_write(struct socket *s, int id) {
 	return s->id == id && nomore_sending_data(s) && ATOM_LOAD(&s->type) == SOCKET_TYPE_CONNECTED && ATOM_LOAD(&s->udpconnecting) == 0;
 }
 
+// 数据入列
 // return -1 when error, 0 when success
 int
 socket_server_send(struct socket_server *ss, struct socket_sendbuffer *buf) {
