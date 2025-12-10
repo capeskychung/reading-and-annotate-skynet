@@ -399,21 +399,37 @@ clear_wb_list(struct wb_list *list) {
 	list->tail = NULL;
 }
 
+// 负责创建并初始化 struct socket_server 实例
+// 初始化 socket 服务的核心数据结构，包括 I/O 多路复用机制、线程间通信管道、连接管理数组等
+// 返回一个初始化完成的 struct socket_server 指针，作为后续所有 socket 操作的入口
+
+/*
+static int
+sp_create() {
+	return epoll_create(1024);
+}
+*/
 struct socket_server *
 socket_server_create(uint64_t time) {
 	int i;
 	int fd[2];
-	poll_fd efd = sp_create();
-	if (sp_invalid(efd)) {
+	poll_fd efd = sp_create(); // 创建 I/O 多路复用句柄
+	if (sp_invalid(efd)) { // 检查句柄
 		skynet_error(NULL, "socket-server error: create event pool failed.");
 		return NULL;
 	}
+
+	// 通过 pipe(fd) 创建一个匿名管道，用于 socket 线程与其他线程（如 Skynet 工作线程）的通信：
+	// fd[0] 为读端（recvctrl_fd），用于接收控制命令（如连接、关闭 socket 的请求）。
+	// fd[1] 为写端（sendctrl_fd），用于发送控制命令。
 	if (pipe(fd)) {
+		// 管道创建失败，释放已创建的事件池句柄并返回 NULL
 		sp_release(efd);
 		skynet_error(NULL, "socket-server error: create socket pair failed.");
 		return NULL;
 	}
-	if (sp_add(efd, fd[0], NULL)) {
+	// 通过 sp_add 将管道读端（fd[0]）注册到事件池（efd），使其能被 I/O 多路复用机制监听
+	if (sp_add(efd, fd[0], NULL)) { 
 		// add recvctrl_fd to event poll
 		skynet_error(NULL, "socket-server error: can't add server fd to event pool.");
 		close(fd[0]);
@@ -422,29 +438,33 @@ socket_server_create(uint64_t time) {
 		return NULL;
 	}
 
+	// 初始化 socket_server 结构体
 	struct socket_server *ss = MALLOC(sizeof(*ss));
-	ss->time = time;
-	ss->event_fd = efd;
-	ss->recvctrl_fd = fd[0];
-	ss->sendctrl_fd = fd[1];
-	ss->checkctrl = 1;
-	ss->reserve_fd = dup(1);	// reserve an extra fd for EMFILE
+	ss->time = time; // 初始化当前时间戳（从框架启动开始计算）
+	ss->event_fd = efd; // 绑定 I/O 多路复用句柄
+	ss->recvctrl_fd = fd[0]; // 绑定管道读端
+	ss->sendctrl_fd = fd[1]; // 绑定管道写端
+	ss->checkctrl = 1;  // 标记需要检查控制管道事件
+	ss->reserve_fd = dup(1);	// reserve an extra fd for EMFILE // 复制标准输出的文件描述符，用于应对 EMFILE（文件描述符耗尽）错误
 
+	// 初始化 socket 连接数组
 	for (i=0;i<MAX_SOCKET;i++) {
 		struct socket *s = &ss->slot[i];
-		ATOM_INIT(&s->type, SOCKET_TYPE_INVALID);
-		clear_wb_list(&s->high);
-		clear_wb_list(&s->low);
-		spinlock_init(&s->dw_lock);
+		ATOM_INIT(&s->type, SOCKET_TYPE_INVALID); // // 初始化 socket 状态为“无效”
+		clear_wb_list(&s->high); // 清空高优先级发送队列
+		clear_wb_list(&s->low); // 清空低优先级发送队列
+		spinlock_init(&s->dw_lock); // 初始化延迟发送缓冲区的自旋锁
 	}
-	ATOM_INIT(&ss->alloc_id , 0);
-	ss->event_n = 0;
-	ss->event_index = 0;
-	memset(&ss->soi, 0, sizeof(ss->soi));
-	FD_ZERO(&ss->rfds);
+
+	// 初始化其他成员变量
+	ATOM_INIT(&ss->alloc_id , 0); // 初始化 socket ID 分配器（原子变量，确保多线程安全）
+	ss->event_n = 0;  // 就绪事件数量初始化为 0
+	ss->event_index = 0; // 事件处理索引初始化为 0
+	memset(&ss->soi, 0, sizeof(ss->soi));  // 初始化 socket 对象接口（内存管理函数）
+	FD_ZERO(&ss->rfds); // 清空文件描述符集合（用于辅助监听控制管道）
 	assert(ss->recvctrl_fd < FD_SETSIZE);
 
-	return ss;
+	return ss; // 确保管道读端的文件描述符在有效范围内
 }
 
 void
