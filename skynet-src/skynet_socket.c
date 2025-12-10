@@ -74,7 +74,7 @@ forward_message(int type, bool padding, struct socket_message * result) {
 	// 消息大小 | 消息类型（PTYPE_SOCKET 表示是 socket 事件消息）
 	message.sz = sz | ((size_t)PTYPE_SOCKET << MESSAGE_TYPE_SHIFT);
 
-	/ 推送到目标上下文（result->opaque 为目标上下文的 handle）
+	// 推送到目标上下文（result->opaque 为目标上下文的 handle）
 	if (skynet_context_push((uint32_t)result->opaque, &message)) {
 		// todo: report somewhere to close socket
 		// don't call skynet_socket_close here (It will block mainloop)
