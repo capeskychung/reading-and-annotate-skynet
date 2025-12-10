@@ -38,36 +38,43 @@ skynet_socket_updatetime() {
 // mainloop thread
 static void
 forward_message(int type, bool padding, struct socket_message * result) {
-	struct skynet_socket_message *sm;
-	size_t sz = sizeof(*sm);
-	if (padding) {
+	// 1. 变量初始化与内存大小计算
+	struct skynet_socket_message *sm; 
+	size_t sz = sizeof(*sm);  // 基础消息结构大小
+	if (padding) { // 需要额外存储字符串数据（如连接地址、错误信息）
 		if (result->data) {
 			size_t msg_sz = strlen(result->data);
 			if (msg_sz > 128) {
-				msg_sz = 128;
+				msg_sz = 128; // 限制最大长度为 128 字节，避免消息过大
 			}
-			sz += msg_sz;
+			sz += msg_sz;  // 总大小 = 基础结构大小 + 字符串长度
 		} else {
-			result->data = "";
+			result->data = ""; // 若数据为空，默认赋值空字符串
 		}
 	}
-	sm = (struct skynet_socket_message *)skynet_malloc(sz);
-	sm->type = type;
-	sm->id = result->id;
-	sm->ud = result->ud;
+	// 2. 分配消息内存并填充内容
+	sm = (struct skynet_socket_message *)skynet_malloc(sz);  // 分配总内存
+	sm->type = type; // 框架定义的事件类型（如 SKYNET_SOCKET_TYPE_ACCEPT）
+	sm->id = result->id; // socket 连接的唯一标识 ID
+	sm->ud = result->ud; // 附加数据（如错误码、端口号等）
 	if (padding) {
-		sm->buffer = NULL;
+		sm->buffer = NULL; // 字符串数据已嵌入消息内存，无需单独指针
+		// 将 result->data 复制到 sm 结构体后面的内存空间（柔性数组思想）
 		memcpy(sm+1, result->data, sz - sizeof(*sm));
 	} else {
-		sm->buffer = result->data;
+		sm->buffer = result->data; // 直接指向底层数据（如网络数据包，无需复制）
 	}
 
+	// 3. 封装为框架消息并推送
 	struct skynet_message message;
 	message.source = 0;
 	message.session = 0;
 	message.data = sm;
+
+	// 消息大小 | 消息类型（PTYPE_SOCKET 表示是 socket 事件消息）
 	message.sz = sz | ((size_t)PTYPE_SOCKET << MESSAGE_TYPE_SHIFT);
-	
+
+	/ 推送到目标上下文（result->opaque 为目标上下文的 handle）
 	if (skynet_context_push((uint32_t)result->opaque, &message)) {
 		// todo: report somewhere to close socket
 		// don't call skynet_socket_close here (It will block mainloop)
@@ -76,32 +83,38 @@ forward_message(int type, bool padding, struct socket_message * result) {
 	}
 }
 
+// 获取就绪事件并转发给对应业务模块
 int 
 skynet_socket_poll() {
+	// 1.获取 socket 服务实例并校验
 	struct socket_server *ss = SOCKET_SERVER;
-	assert(ss);
-	struct socket_message result;
-	int more = 1;
-	int type = socket_server_poll(ss, &result, &more);
+	assert(ss); // // 确保 socket 服务已初始化，否则触发断言失败
+
+	// 2. 获取就绪事件
+	struct socket_message result; // 存储从 socket 服务获取的事件详情
+	int more = 1;  // 标记是否还有更多未处理的事件（输出参数）
+	int type = socket_server_poll(ss, &result, &more); // 从 socket 服务中获取一个就绪事件，返回事件类型
+
+	// 3. 根据事件类型转发消息
 	switch (type) {
-	case SOCKET_EXIT:
-		return 0;
-	case SOCKET_DATA:
-		forward_message(SKYNET_SOCKET_TYPE_DATA, false, &result);
+	case SOCKET_EXIT: // socket 服务退出事件
+		return 0; // 告知框架 socket 服务已退出
+	case SOCKET_DATA: // 数据到达事件
+		forward_message(SKYNET_SOCKET_TYPE_DATA, false, &result); // 转发消息
 		break;
-	case SOCKET_CLOSE:
+	case SOCKET_CLOSE: // 关闭，转发socket关闭消息
 		forward_message(SKYNET_SOCKET_TYPE_CLOSE, false, &result);
 		break;
-	case SOCKET_OPEN:
+	case SOCKET_OPEN: // 连接建立，转发
 		forward_message(SKYNET_SOCKET_TYPE_CONNECT, true, &result);
 		break;
-	case SOCKET_ERR:
+	case SOCKET_ERR: // 错误
 		forward_message(SKYNET_SOCKET_TYPE_ERROR, true, &result);
 		break;
-	case SOCKET_ACCEPT:
+	case SOCKET_ACCEPT: //  SOCKET_ACCEPT 表示新连接接入
 		forward_message(SKYNET_SOCKET_TYPE_ACCEPT, true, &result);
 		break;
-	case SOCKET_UDP:
+	case SOCKET_UDP: // udp的消息
 		forward_message(SKYNET_SOCKET_TYPE_UDP, false, &result);
 		break;
 	case SOCKET_WARNING:
@@ -111,7 +124,7 @@ skynet_socket_poll() {
 		skynet_error(NULL, "error: Unknown socket message type %d.",type);
 		return -1;
 	}
-	if (more) {
+	if (more) { // 还有数据没处理完，告知外部循环接着poll
 		return -1;
 	}
 	return 1;
