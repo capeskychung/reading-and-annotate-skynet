@@ -2407,19 +2407,22 @@ socket_server_udp_connect(struct socket_server *ss, int id, const char * addr, i
 	return 0;
 }
 
+// 从 UDP 类型的 socket 消息中解析并返回发送方的地址信息
 const struct socket_udp_address *
 socket_server_udp_address(struct socket_server *ss, struct socket_message *msg, int *addrsz) {
 	uint8_t * address = (uint8_t *)(msg->data + msg->ud);
-	int type = address[0];
+	// msg->data 是 UDP 消息的数据缓冲区（包含数据包内容及地址信息）。
+	// msg->ud 是地址信息在缓冲区中的偏移量（标记地址数据的起始位置）
+	int type = address[0]; // // 第一个字节存储地址类型标识
 	switch(type) {
 	case PROTOCOL_UDP:
-		*addrsz = 1+2+4;
+		*addrsz = 1+2+4;  // IPv4 地址长度：1字节类型 + 2字节端口 + 4字节IPv4地址
 		break;
 	case PROTOCOL_UDPv6:
-		*addrsz = 1+2+16;
+		*addrsz = 1+2+16;  // IPv6 地址长度：1字节类型 + 2字节端口 + 16字节IPv6地址
 		break;
 	default:
-		return NULL;
+		return NULL; // 未知地址类型，返回空
 	}
 	return (const struct socket_udp_address *)address;
 }

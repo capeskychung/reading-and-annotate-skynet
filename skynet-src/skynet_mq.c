@@ -18,20 +18,25 @@
 #define MQ_IN_GLOBAL 1
 #define MQ_OVERLOAD 1024
 
+// 每个service维护一个私有的消息队列，时实现服务间通信的核心数据结构
 struct message_queue {
-	struct spinlock lock;
-	uint32_t handle;
-	int cap;
-	int head;
-	int tail;
-	int release;
-	int in_global;
-	int overload;
-	int overload_threshold;
-	struct skynet_message *queue;
+	struct spinlock lock; // 自旋锁（spinlock），用于保证多线程操作消息队列时的线程安全
+	uint32_t handle; //	关联的服务句柄（handle），即当前消息队列所属服务的唯一标识
+	int cap; // 消息队列的容量（即可以容纳的最大消息数量）
+	int head; // 消息队列的头指针，指向队列中第一个消息的位置
+	int tail; // 消息队列的尾指针，指向队列中最后一个消息的下一个位置
+	int release; // 释放标记（0：正常；1：待释放）
+	int in_global; // 全局队列标识（0：不在全局队列；1：在全局队列或正在调度）
+	int overload; // 消息队列是否处于 overloaded 状态
+	int overload_threshold; // 消息队列的 overloaded 阈值 默认1024
+	struct skynet_message *queue; // 消息队列数组，用于存储实际的消息数据
+
+	// 用于将多个 message_queue 串联成链表（主要用于全局消息队列 global_queue 的存储，global_queue 是一个链表结构）。
 	struct message_queue *next;
 };
 
+// 全局消息队列，单链表结构
+// head 用于获取下一个待处理的服务消息队列，tail 用于高效地将新队列追加到全局队列末尾
 struct global_queue {
 	struct message_queue *head;
 	struct message_queue *tail;
@@ -40,40 +45,44 @@ struct global_queue {
 
 static struct global_queue *Q = NULL;
 
+// 新增一个service的时候，将消息队列放进全局消息队列
 void 
 skynet_globalmq_push(struct message_queue * queue) {
 	struct global_queue *q= Q;
 
 	SPIN_LOCK(q)
-	assert(queue->next == NULL);
+	assert(queue->next == NULL); // 只有全局消息队列的next才有用，普通的消息队列next应为null
 	if(q->tail) {
 		q->tail->next = queue;
 		q->tail = queue;
-	} else {
+	} else { // 全局消息队列是空的
 		q->head = q->tail = queue;
 	}
 	SPIN_UNLOCK(q)
 }
 
+// 从全局消息队列中去除一个消息队列
 struct message_queue * 
 skynet_globalmq_pop() {
-	struct global_queue *q = Q;
+	// 局部变量的访问在编译器层面可能被优化（如寄存器缓存），相比直接访问全局变量，可能带来微小的性能提升
+	struct global_queue *q = Q; 
 
 	SPIN_LOCK(q)
 	struct message_queue *mq = q->head;
 	if(mq) {
 		q->head = mq->next;
-		if(q->head == NULL) {
+		if(q->head == NULL) { // 全局消息队列为空
 			assert(mq == q->tail);
 			q->tail = NULL;
 		}
-		mq->next = NULL;
+		mq->next = NULL; // 将消息队列的 next 指针置为 NULL，表示该消息队列已从全局消息队列中移除
 	}
 	SPIN_UNLOCK(q)
 
 	return mq;
 }
 
+// 创建一个消息队列， 是否进入全局队列交由外部处理，每个函数只做自己的事情，简单化
 struct message_queue * 
 skynet_mq_create(uint32_t handle) {
 	struct message_queue *q = skynet_malloc(sizeof(*q));
@@ -85,6 +94,7 @@ skynet_mq_create(uint32_t handle) {
 	// When the queue is create (always between service create and service init) ,
 	// set in_global flag to avoid push it to global queue .
 	// If the service init success, skynet_context_new will call skynet_mq_push to push it to global queue.
+	// 服务初始化好之后，会在skynet_context_new  中 调用skynet_globalmq_push 将其推入全局队列。
 	q->in_global = MQ_IN_GLOBAL;
 	q->release = 0;
 	q->overload = 0;
@@ -108,6 +118,7 @@ skynet_mq_handle(struct message_queue *q) {
 	return q->handle;
 }
 
+// 获取消息队列的长度
 int
 skynet_mq_length(struct message_queue *q) {
 	int head, tail,cap;
@@ -155,7 +166,7 @@ skynet_mq_pop(struct message_queue *q, struct skynet_message *message) {
 		}
 		while (length > q->overload_threshold) {
 			q->overload = length;
-			q->overload_threshold *= 2;
+			q->overload_threshold *= 2; // 消息队列的 overloaded 阈值翻倍
 		}
 	} else {
 		// reset overload_threshold when queue is empty

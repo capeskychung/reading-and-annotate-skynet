@@ -216,17 +216,19 @@ skynet_socket_udp_sendbuffer(struct skynet_context *ctx, const char * address, s
 	return socket_server_udp_send(SOCKET_SERVER, (const struct socket_udp_address *)address, buffer);
 }
 
+// 从 UDP 类型的 socket 事件消息中获取发送方的地址信息
 const char *
 skynet_socket_udp_address(struct skynet_socket_message *msg, int *addrsz) {
+	// 1. UDP 消息类型校验
 	if (msg->type != SKYNET_SOCKET_TYPE_UDP) {
 		return NULL;
 	}
 	struct socket_message sm;
-	sm.id = msg->id;
-	sm.opaque = 0;
-	sm.ud = msg->ud;
-	sm.data = msg->buffer;
-	return (const char *)socket_server_udp_address(SOCKET_SERVER, &sm, addrsz);
+	sm.id = msg->id;  // 复制 socket 连接的唯一标识 ID
+	sm.opaque = 0;    // 透明字段（此处无需使用，设为 0）
+	sm.ud = msg->ud;  // 复制附加数据（可能包含地址相关的元信息）
+	sm.data = msg->buffer; // 复制数据缓冲区（UDP 数据包内容）
+	return (const char *)socket_server_udp_address(SOCKET_SERVER, &sm, addrsz); // 调用底层函数获取地址
 }
 
 struct socket_info *
