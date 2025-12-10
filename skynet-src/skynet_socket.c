@@ -11,8 +11,9 @@
 #include <string.h>
 #include <stdbool.h>
 
-static struct socket_server * SOCKET_SERVER = NULL;
+static struct socket_server * SOCKET_SERVER = NULL; // 唯一的 socket 服务器实例
 
+// 创建并初始化底层的 socket 服务器实例，为框架的网络通信功能提供基础支持
 void 
 skynet_socket_init() {
 	SOCKET_SERVER = socket_server_create(skynet_now());
