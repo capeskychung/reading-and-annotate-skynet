@@ -145,34 +145,45 @@ skynet_mq_overload(struct message_queue *q) {
 	return 0;
 }
 
+// 从指定消息队列中取出消息的核心函数
+// 从队列头部提取消息，更新队列状态（如头部指针、过载阈值），并在队列空时标记队列退出全局队列
 int
 skynet_mq_pop(struct message_queue *q, struct skynet_message *message) {
-	int ret = 1;
-	SPIN_LOCK(q)
+	int ret = 1; // 默认为1（表示队列空，未取出消息）
+	SPIN_LOCK(q) // 加自旋锁，保证多线程操作队列的安全性
 
+	// 若队列非空（头指针 != 尾指针）
 	if (q->head != q->tail) {
+		// 取出队头消息并移动头指针
 		*message = q->queue[q->head++];
-		ret = 0;
+		ret = 0; // 成功取出消息，返回值设为0
+
+		// 缓存当前头、尾指针和队列容量（避免重复访问结构体成员）
 		int head = q->head;
 		int tail = q->tail;
 		int cap = q->cap;
 
+		// 若头指针超出容量，循环回到队列起始位置（环形队列特性）
 		if (head >= cap) {
 			q->head = head = 0;
 		}
+		// 计算当前队列中的消息数量
 		int length = tail - head;
-		if (length < 0) {
+		if (length < 0) { // 当头指针 > 尾指针时（环形队列绕回），需加上容量计算真实长度
 			length += cap;
 		}
+		// 处理过载阈值：若当前长度超过阈值，则更新过载标记并翻倍阈值
 		while (length > q->overload_threshold) {
 			q->overload = length;
 			q->overload_threshold *= 2; // 消息队列的 overloaded 阈值翻倍
 		}
 	} else {
 		// reset overload_threshold when queue is empty
+		// 队列空时，重置过载阈值为默认值（MQ_OVERLOAD = 1024）
 		q->overload_threshold = MQ_OVERLOAD;
 	}
 
+	// 若未取出消息（队列空），标记队列不在全局队列中
 	if (ret) {
 		q->in_global = 0;
 	}
@@ -182,38 +193,52 @@ skynet_mq_pop(struct message_queue *q, struct skynet_message *message) {
 	return ret;
 }
 
+// 当消息队列（环形缓冲区）已满时，将队列容量翻倍，确保新消息能继续入队，避免消息丢失
 static void
 expand_queue(struct message_queue *q) {
+	// 分配新的队列缓冲区，容量为当前的2倍
 	struct skynet_message *new_queue = skynet_malloc(sizeof(struct skynet_message) * q->cap * 2);
 	int i;
+	// 将旧队列中的消息按顺序复制到新队列
 	for (i=0;i<q->cap;i++) {
+		// 计算旧队列中第i个有效消息的位置（环形队列特性）
 		new_queue[i] = q->queue[(q->head + i) % q->cap];
 	}
+
+	// 重置新队列的头指针为0（消息从新队列起始位置开始）
 	q->head = 0;
+	// 新队列的尾指针设为旧队列的容量（因为复制了旧队列全部消息）
 	q->tail = q->cap;
+	// 更新队列容量为原来的2倍
 	q->cap *= 2;
 	
 	skynet_free(q->queue);
 	q->queue = new_queue;
 }
 
+
+// 向指定消息队列（message_queue）插入消息的核心函数
 void 
 skynet_mq_push(struct message_queue *q, struct skynet_message *message) {
-	assert(message);
-	SPIN_LOCK(q)
+	assert(message); // 确保消息指针非空，避免无效操作
+	SPIN_LOCK(q) // 加自旋锁，保证多线程插入消息的安全性
 
+	// 将消息存入队列尾部（tail 指针位置）
 	q->queue[q->tail] = *message;
+	// 尾指针后移，若超出队列容量则重置为0（环形队列特性）
 	if (++ q->tail >= q->cap) {
 		q->tail = 0;
 	}
 
+	// 若头指针与尾指针重合，说明队列已满，触发扩容
 	if (q->head == q->tail) {
 		expand_queue(q);
 	}
 
+	// 若队列当前不在全局队列中（in_global=0），则将其加入全局队列
 	if (q->in_global == 0) {
-		q->in_global = MQ_IN_GLOBAL;
-		skynet_globalmq_push(q);
+		q->in_global = MQ_IN_GLOBAL; // 标记为已加入全局队列
+		skynet_globalmq_push(q); // 插入全局队列
 	}
 	
 	SPIN_UNLOCK(q)
@@ -227,23 +252,31 @@ skynet_mq_init() {
 	Q=q;
 }
 
+// 标记消息队列（message_queue）为 “待释放” 状态，
+// 并确保该队列被加入全局队列，以便后续由 skynet_mq_release 函数处理其释放逻辑
 void 
 skynet_mq_mark_release(struct message_queue *q) {
 	SPIN_LOCK(q)
-	assert(q->release == 0);
-	q->release = 1;
+	assert(q->release == 0); // 确保队列未被标记过释放，避免重复操作
+	q->release = 1; // 将队列标记为待释放状态
+
+	// 若队列当前不在全局队列中，则将其加入全局队列
 	if (q->in_global != MQ_IN_GLOBAL) {
 		skynet_globalmq_push(q);
 	}
 	SPIN_UNLOCK(q)
 }
 
+// 用于彻底清除消息队列及其包含的消息资源
 static void
 _drop_queue(struct message_queue *q, message_drop drop_func, void *ud) {
 	struct skynet_message msg;
+	// // 循环从队列中弹出消息，直到队列为空（skynet_mq_pop 返回非0表示弹出失败）
 	while(!skynet_mq_pop(q, &msg)) {
+		// // 调用外部传入的回调函数处理弹出的消息（如释放消息内容）
 		drop_func(&msg, ud);
 	}
+	// 释放队列自身的内存资源
 	_release(q);
 }
 
@@ -251,11 +284,11 @@ void
 skynet_mq_release(struct message_queue *q, message_drop drop_func, void *ud) {
 	SPIN_LOCK(q)
 	
-	if (q->release) {
+	if (q->release) { // 如果标记为待释放
 		SPIN_UNLOCK(q)
-		_drop_queue(q, drop_func, ud);
-	} else {
-		skynet_globalmq_push(q);
+		_drop_queue(q, drop_func, ud); // 执行队列清理和释放
+	} else {  // 若队列未标记为待释放
+		skynet_globalmq_push(q); // 将队列重新加入全局队列，等待后续调度
 		SPIN_UNLOCK(q)
 	}
 }
