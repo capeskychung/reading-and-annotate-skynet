@@ -1,3 +1,5 @@
+# Makefile 不能在单行后注释代码
+
 # 引入平台相关的编译配置（比如不同系统的编译参数）
 include platform.mk
 
