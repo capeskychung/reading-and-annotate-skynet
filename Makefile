@@ -2,21 +2,28 @@
 include platform.mk
 
 # 定义默认输出路径
-LUA_CLIB_PATH ?= luaclib  # Lua 扩展库输出目录
-CSERVICE_PATH ?= cservice # C 服务模块输出目录
+# Lua 扩展库输出目录
+LUA_CLIB_PATH ?= luaclib
+# C 服务模块输出目录
+CSERVICE_PATH ?= cservice
 
-SKYNET_BUILD_PATH ?= .   # Skynet 主程序输出目录
+# Skynet 主程序输出目录
+SKYNET_BUILD_PATH ?= .
 
 # 编译选项：调试信息 + 优化 + 警告 + Lua 头文件路径
 CFLAGS = -g -O2 -Wall -I$(LUA_INC) $(MYCFLAGS)
-# CFLAGS += -DUSE_PTHREAD_LOCK # 可选：启用 pthread 锁（多线程场景）
+# 可选：启用 pthread 锁（多线程场景）
+# CFLAGS += -DUSE_PTHREAD_LOCK
 
 # lua
 
 # -------------------------- Lua 依赖 --------------------------
-LUA_STATICLIB := 3rd/lua/liblua.a # Lua 静态库路径
-LUA_LIB ?= $(LUA_STATICLIB) # 默认使用Lua静态库
-LUA_INC ?= 3rd/lua  # Lua头文件路径
+# Lua 静态库路径
+LUA_STATICLIB := 3rd/lua/liblua.a
+# 默认使用Lua静态库
+LUA_LIB ?= $(LUA_STATICLIB)
+# Lua头文件路径
+LUA_INC ?= 3rd/lua
 
 
 # 编译Lua静态库的规则：进入 3rd/lua 目录，按平台编译
@@ -27,13 +34,17 @@ $(LUA_STATICLIB) :
 
 # -------------------------- TLS/HTTPS 可选依赖 --------------------------
 # TLS_MODULE=ltls # 启用时会编译 ltls.so，支持 HTTPS
-TLS_LIB=  # TLS 库路径（如 OpenSSL）
-TLS_INC=  # TLS 头文件路径
+# TLS 库路径（如 OpenSSL）
+TLS_LIB=
+# TLS 头文件路径
+TLS_INC=
 
 # jemalloc
 # -------------------------- Jemalloc 内存分配器 --------------------------
-JEMALLOC_STATICLIB := 3rd/jemalloc/lib/libjemalloc_pic.a # jemalloc 静态库
-JEMALLOC_INC := 3rd/jemalloc/include/jemalloc # jemalloc 头文件
+# jemalloc 静态库
+JEMALLOC_STATICLIB := 3rd/jemalloc/lib/libjemalloc_pic.a
+# jemalloc 头文件
+JEMALLOC_INC := 3rd/jemalloc/include/jemalloc
 
 all : jemalloc 
 
@@ -47,14 +58,17 @@ $(JEMALLOC_STATICLIB) : 3rd/jemalloc/Makefile
 
 
 3rd/jemalloc/autogen.sh :
-	git submodule update --init # 拉取 jemalloc 源码（如果未初始化）
+	# 拉取 jemalloc 源码（如果未初始化）
+	git submodule update --init
 
 3rd/jemalloc/Makefile : | 3rd/jemalloc/autogen.sh
 	cd 3rd/jemalloc && ./autogen.sh --with-jemalloc-prefix=je_ --enable-prof
 
-jemalloc : $(MALLOC_STATICLIB) # 编译 jemalloc
+# 编译 jemalloc
+jemalloc : $(MALLOC_STATICLIB)
 
-update3rd : # 重置 jemalloc 子模块
+# 重置 jemalloc 子模块
+update3rd :
 	rm -rf 3rd/jemalloc && git submodule update --init 
 
 # skynet
