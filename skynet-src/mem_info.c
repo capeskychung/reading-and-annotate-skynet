@@ -4,9 +4,11 @@
 
 void
 meminfo_init(MemInfo *info) {
+    // 初始化内存信息
     memset(info, 0, sizeof(*info));
 }
 
+// 线程安全的原子化初始化内存信息数据
 void
 atomic_meminfo_init(AtomicMemInfo *info) {
     ATOM_INIT(&info->alloc, 0);
@@ -15,6 +17,7 @@ atomic_meminfo_init(AtomicMemInfo *info) {
     ATOM_INIT(&info->free_count, 0);
 }
 
+// 分配内存时，统计数据
 void
 meminfo_alloc(MemInfo *info, size_t size) {
     info->alloc += size;
@@ -27,6 +30,7 @@ atomic_meminfo_alloc(AtomicMemInfo *info, size_t size) {
     ATOM_FADD(&info->alloc_count, 1);
 }
 
+// 释放内存时统计释放数据
 void
 meminfo_free(MemInfo *info, size_t size) {
     info->free += size;
@@ -39,6 +43,7 @@ atomic_meminfo_free(AtomicMemInfo *info, size_t size) {
     ATOM_FADD(&info->free_count, 1);
 }
 
+// 将多个MemInfo的数据合并在一起
 void
 meminfo_merge(MemInfo *dest, const MemInfo *src) {
     dest->alloc += src->alloc;

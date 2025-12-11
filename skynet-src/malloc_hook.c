@@ -16,28 +16,42 @@
 #define MEMORY_ALLOCTAG 0x20140605
 #define MEMORY_FREETAG 0x0badf00d
 
+
+// alignas(CACHE_LINE_SIZE) 这是 C11 标准的对齐说明符，强制 handle 成员（以及整个结构体）
+// 按照 CACHE_LINE_SIZE（缓存行大小，通常为 64 字节）对齐
+// 避免 “缓存行伪共享”
 struct mem_data {
     alignas(CACHE_LINE_SIZE)
-	ATOM_ULONG     handle;
+	ATOM_ULONG     handle; // 存储与当前内存统计槽位关联的 “服务句柄” 绑定内存分配数据到具体服务
     AtomicMemInfo  info;
 };
 _Static_assert(sizeof(struct mem_data) % CACHE_LINE_SIZE == 0, "mem_data must be cache-line aligned");
 
+// 在内存分配时附加额外的元数据
+//  内存跟踪机制的核心元数据结构 通过在用户申请的内存块前附加该结构体
 struct mem_cookie {
-	size_t size;
-	uint32_t handle;
+	size_t size; // 分配的内存大小
+	uint32_t handle; // 服务句柄
 #ifdef MEMORY_CHECK
-	uint32_t dogtag;
+	uint32_t dogtag; // 仅在定义 MEMORY_CHECK 宏时存在，用于内存完整性校验：
 #endif
+ // 明确记录当前 mem_cookie 结构体自身的大小
 	uint32_t cookie_size;	// should be the last
 };
 
 #define SLOT_SIZE 0x10000
 #define PREFIX_SIZE sizeof(struct mem_cookie)
 
+// 按服务跟踪内存使用的核心数据结构
+// 关联服务与内存统计
+// 高效统计
+// 空间与精度平衡
+
 static struct mem_data mem_stats[SLOT_SIZE];
 _Static_assert(alignof(mem_stats) % CACHE_LINE_SIZE == 0, "mem_stats must be cache-line aligned");
 
+// 通过服务句柄（handle）计算哈希索引，定位到 mem_stats 数组中对应的 mem_data 结构体，
+// 从而获取该服务的内存分配统计信息（如分配 / 释放的字节数、块数等）
 static struct mem_data *
 get_mem_stat(uint32_t handle) {
 	int h = (int)(handle & (SLOT_SIZE - 1));
@@ -45,7 +59,7 @@ get_mem_stat(uint32_t handle) {
 	return data;
 }
 
-#ifndef NOUSE_JEMALLOC
+#ifndef NOUSE_JEMALLOC // 如果没有定义不使用jemalloc, 即默认用jemalloc
 
 #include "jemalloc.h"
 
@@ -68,18 +82,26 @@ update_xmalloc_stat_free(uint32_t handle, size_t __n) {
 	atomic_meminfo_free(&data->info, __n);
 }
 
+// 当通过 skynet_malloc、skynet_realloc 等函数分配内存时，
+// 会在用户实际使用的内存块前附加一段元数据（mem_cookie），
+// fill_prefix 负责初始化这段元数据并返回用户可用的内存地址
 inline static void*
 fill_prefix(char* ptr, size_t sz, uint32_t cookie_size) {
+	// 获取当前执行内存分配操作的skynet服务句柄，用于将内存块与服务绑定
 	uint32_t handle = skynet_current_handle();
-	struct mem_cookie *p = (struct mem_cookie *)ptr;
-	char * ret = ptr + cookie_size;
-	sz += cookie_size;
-	p->size = sz;
-	p->handle = handle;
+
+	// 定位元数据结构体
+	struct mem_cookie *p = (struct mem_cookie *)ptr; // 将原始内存块起始地址 ptr 强制转换为 mem_cookie 指针，作为元数据的起始位置
+	char * ret = ptr + cookie_size; // 计算用户可用内存的起始地址 ret：原始地址加上元数据大小 cookie_size
+	sz += cookie_size;  // 计算总内存大小（用户数据 + 元数据）
+	p->size = sz; // 记录总内存大小（释放时需用）
+	p->handle = handle; // 绑定当前服务句柄
 #ifdef MEMORY_CHECK
-	p->dogtag = MEMORY_ALLOCTAG;
+	p->dogtag = MEMORY_ALLOCTAG; // 内存校验标记（分配时设为特定值）
 #endif
+	// 更新内存统计，当前服务的内存配分统计，字节数
 	update_xmalloc_stat_alloc(handle, sz);
+	// 记录元数据大小
 	memcpy(ret - sizeof(uint32_t), &cookie_size, sizeof(cookie_size));
 	return ret;
 }
@@ -112,7 +134,7 @@ static void malloc_oom(size_t size) {
 	fprintf(stderr, "xmalloc: Out of memory trying to allocate %zu bytes\n",
 		size);
 	fflush(stderr);
-	abort();
+	abort(); // 内存不够，强制退出程序
 }
 
 void
@@ -306,21 +328,28 @@ malloc_memory_block(void) {
 	return total.alloc_count - total.free_count;
 }
 
+// 遍历所有内存统计槽位（mem_stats 数组），收集并打印每个有效服务的内存使用数据，
+// 最后汇总并输出总内存使用量
+// c 层的内存使用统计
 void
 dump_c_mem() {
+	// 初始化与日志头
 	skynet_error(NULL, "dump all service mem:");
 	MemInfo total = {};
 	for(int i = 0; i < SLOT_SIZE; i++) {
 		struct mem_data* data = &mem_stats[i];
 		const uint32_t handle = ATOM_LOAD(&data->handle);
 		if (handle != 0) {
+			// 处理有效服务的内存信息
 			MemInfo info = {};
+			// 收集单个服务的内存信息
 			atomic_meminfo_merge(&info, &data->info);
 			meminfo_merge(&total, &info);
 			const size_t using = info.alloc - info.free;
 			skynet_error(NULL, ":%08x -> %zukb %zub", handle, using >> 10, using);
 		}
 	}
+	// 输出总内存使用量
 	const size_t using = total.alloc - total.free;
 	skynet_error(NULL, "+total: %zukb", using >> 10);
 }
@@ -343,6 +372,7 @@ skynet_lalloc(void *ptr, size_t osize, size_t nsize) {
 	}
 }
 
+// 内存统计返回到lua层，供lua脚本层使用
 int
 dump_mem_lua(lua_State *L) {
 	int i;
